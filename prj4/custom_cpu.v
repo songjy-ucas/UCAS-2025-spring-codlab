@@ -1,0 +1,535 @@
+`timescale 10ns / 1ns
+
+//ALUop译码模块
+module ALUop(
+    input  [5:0] Opcode,
+	input  [5:0]   func,
+	output [2:0]  ALUop
+);
+    assign ALUop = (Opcode == 6'b000000) ? (
+	               (func   == 6'b100001) ? 3'b010 :
+	               (func   == 6'b100011) ? 3'b110 :
+		           (func   == 6'b100100) ? 3'b000 :
+		           (func   == 6'b100111) ? 3'b101 :
+		           (func   == 6'b100101) ? 3'b001 :
+		           (func   == 6'b100110) ? 3'b100 :
+		           (func   == 6'b101010) ? 3'b111 :
+				   (func   == 6'b101011) ? 3'b011 :
+				                           3'b001):
+	               (Opcode == 6'b000001) ? 3'b111 :
+				   (Opcode[5:3] == 3'b000)? 3'b110:
+				   (Opcode[5:3] == 3'b101 || Opcode[5:3] == 3'b100)? 3'b010 :
+				   (Opcode == 6'b001001) ? 3'b010 :
+				   (Opcode == 6'b001100) ? 3'b000 :
+				   (Opcode == 6'b001101) ? 3'b001 :
+				   (Opcode == 6'b001110) ? 3'b100 :
+				   (Opcode == 6'b001010) ? 3'b111 :
+				                           3'b011 ; 
+endmodule
+
+module CU(
+	input EX_IF,
+	input EX_WB,
+	input EX_LD,
+	input EX_ST,
+	input clk,
+	input rst,
+	input Inst_Req_Ready,
+	input Inst_Valid,
+	input Mem_Req_Ready,
+	input Read_data_Valid,
+	input  [31:0] Instruction,
+	output [ 8:0]current_stata,
+	output Inst_Req_Valid,
+	output Inst_Ready,
+	output Read_data_Ready,
+	output MemRead,
+	output MemWrite
+);
+    reg [8:0] current_stata_reg;
+	reg [8:0] next_stata_reg;
+	assign current_stata = current_stata_reg;
+
+	localparam INIT = 9'b000000001,
+	           IF   = 9'b000000010,
+			   IW   = 9'b000000100,
+			   ID   = 9'b000001000,
+			   EX   = 9'b000010000,
+			   ST   = 9'b000100000,
+			   LD   = 9'b001000000,
+			   RDW  = 9'b010000000,
+			   WB   = 9'b100000000;
+	always @(posedge clk) begin
+		if(rst == 1'b1) begin
+			current_stata_reg <= INIT;
+		end
+		else begin
+			current_stata_reg <= next_stata_reg;
+		end
+	end
+	always @(*) begin
+	    case(current_stata_reg)
+		    INIT:begin
+				 if(rst == 1'b0) begin
+					next_stata_reg = IF;
+				 end
+				 else begin
+					next_stata_reg = current_stata_reg;
+			     end
+			end
+			IF: begin
+				if(Inst_Req_Ready == 1'b1) begin
+					next_stata_reg = IW;
+				end
+				else begin 
+					next_stata_reg = current_stata_reg;
+				end
+			end
+			IW:begin
+				if(Inst_Valid == 1'b1) begin
+					next_stata_reg = ID;
+				end
+				else begin
+					next_stata_reg = current_stata_reg;
+				end
+			end
+            ID:begin
+				if(Instruction != 0) begin
+					next_stata_reg = EX;
+				end
+                else begin
+					next_stata_reg = IF;
+				end
+			end
+			EX:begin
+				if(EX_IF) begin
+					next_stata_reg = IF;
+				end
+				else if(EX_WB) begin
+					next_stata_reg = WB;
+				end
+				else if(EX_ST) begin
+					next_stata_reg = ST;
+				end
+				else if(EX_LD) begin
+					next_stata_reg = LD;
+				end
+				else begin
+					next_stata_reg = current_stata_reg;
+				end
+			end
+			ST:begin
+				if(Mem_Req_Ready) begin
+					next_stata_reg = IF;
+				end
+				else begin
+					next_stata_reg = current_stata_reg;
+				end
+			end
+			WB:begin
+				next_stata_reg = IF;
+			end
+			LD:begin
+				if(Mem_Req_Ready) begin
+					next_stata_reg = RDW;
+				end
+				else begin
+					next_stata_reg = current_stata_reg;
+				end
+			end
+			RDW:begin
+				if(Read_data_Valid) begin
+					next_stata_reg = WB;
+				end
+				else begin
+					next_stata_reg = current_stata_reg;
+				end
+			end
+		endcase 
+	end	
+	assign Inst_Req_Valid  = current_stata == IF;
+	assign Inst_Ready      = current_stata == IW  | current_stata == INIT;
+	assign Read_data_Ready = current_stata == RDW | current_stata == INIT;
+	assign MemRead         = current_stata == LD;
+	assign MemWrite        = current_stata == ST;        
+
+endmodule
+
+module custom_cpu(
+	input         clk,
+	input         rst,
+
+	//Instruction request channel
+	output [31:0] PC,
+	output        Inst_Req_Valid,
+	input         Inst_Req_Ready,
+
+	//Instruction response channel
+	input  [31:0] Instruction,
+	input         Inst_Valid,
+	output        Inst_Ready,
+
+	//Memory request channel
+	output [31:0] Address,
+	output        MemWrite,
+	output [31:0] Write_data,
+	output [ 3:0] Write_strb,
+	output        MemRead,
+	input         Mem_Req_Ready,
+
+	//Memory data response channel
+	input  [31:0] Read_data,
+	input         Read_data_Valid,
+	output        Read_data_Ready,
+
+	input         intr,
+
+	output [31:0] cpu_perf_cnt_0,
+	output [31:0] cpu_perf_cnt_1,
+	output [31:0] cpu_perf_cnt_2,
+	output [31:0] cpu_perf_cnt_3,
+	output [31:0] cpu_perf_cnt_4,
+	output [31:0] cpu_perf_cnt_5,
+	output [31:0] cpu_perf_cnt_6,
+	output [31:0] cpu_perf_cnt_7,
+	output [31:0] cpu_perf_cnt_8,
+	output [31:0] cpu_perf_cnt_9,
+	output [31:0] cpu_perf_cnt_10,
+	output [31:0] cpu_perf_cnt_11,
+	output [31:0] cpu_perf_cnt_12,
+	output [31:0] cpu_perf_cnt_13,
+	output [31:0] cpu_perf_cnt_14,
+	output [31:0] cpu_perf_cnt_15,
+
+	output [69:0] inst_retire
+);
+
+/* The following signal is leveraged for behavioral simulation, 
+* which is delivered to testbench.
+*
+* STUDENTS MUST CONTROL LOGICAL BEHAVIORS of THIS SIGNAL.
+*
+* inst_retired (70-bit): detailed information of the retired instruction,
+* mainly including (in order) 
+* { 
+*   reg_file write-back enable  (69:69,  1-bit),
+*   reg_file write-back address (68:64,  5-bit), 
+*   reg_file write-back data    (63:32, 32-bit),  
+*   retired PC                  (31: 0, 32-bit)
+* }
+*
+*/
+localparam INIT = 9'b000000001,
+           IF   = 9'b000000010,
+           IW   = 9'b000000100,
+           ID   = 9'b000001000,
+           EX   = 9'b000010000,
+           ST   = 9'b000100000,
+           LD   = 9'b001000000,
+           RDW  = 9'b010000000,
+           WB   = 9'b100000000;
+
+	wire			RF_wen;//寄存器写使能
+	wire [4:0]		RF_waddr;//寄存器写地址
+	wire [31:0]		RF_wdata;//写入值
+	assign inst_retire = {RF_wen,RF_waddr,_RF_wdata,PC};
+
+    //会用到的instruction的各段,instruction只在IF阶段更新
+	reg  [31:0] instruction;
+	always @(*) begin
+		   if(current_stata == IW) begin
+			   instruction = Instruction;
+		   end
+		end
+	wire [5:0] Opcode = instruction[31:26];
+	wire [4:0] rs     = instruction[25:21];
+	wire [4:0] rt     = instruction[20:16];
+	wire [4:0] rd     = instruction[15:11];
+	wire [5:0] shamt  = instruction[10: 6];
+    wire [6:0] func   = instruction[ 5: 0];
+	wire [15:0]imm    = instruction[15: 0];
+	wire [25:0]tar    = instruction[25: 0];
+
+	wire          RegDst;          //选择读写寄存器的地址
+	wire          jump;            //是否为jump指令
+	wire          branch;          //是否为branch指令
+	wire          move;            //判断是不是move指令
+	wire [2:0]    ALUSrc;          //选择寄存器还是立即数，读入alu计算,高两位判断alu操作数1的选择，低两位判断alu操作数2的选择 
+    wire [31:0]   rsdata;          //寄存器rs读出的值
+	wire [31:0]   rtdata;          //寄存器rd读出的值
+	wire [31:0]   rddata;          //移位结果
+	wire [4:0]    shiftlength;     //移位位数
+ 	wire          zero;            //结果是否为0
+	wire [31:0]   Result;          //alu结果
+	wire [31:0]   imm_32;          //拓展到32位的立即数 即imm + shifter -----> imm_32
+    
+//imm_32的计算
+    wire [31:0] imm_32_0E;
+	wire [31:0] imm_32_SE;
+	wire [31:0] imm_32_SE00;//用于跳转指令的imm(SE)||00
+	wire [31:0] imm_32_1600;//用于lui指令
+	wire        imm_sign = imm[15];
+
+	assign imm_32_SE00 = {{14{imm_sign}},imm,2'b00};
+	assign imm_32_0E   = {{16{1'b0}},imm} ;
+	assign imm_32_SE   = {{16{imm_sign}},imm} ;
+	assign imm_32_1600 = {imm,{16{1'b0}}};
+
+    assign imm_32 = (Opcode == 6'b001100 || Opcode == 6'b001101 || Opcode == 6'b001110) ? imm_32_0E  :
+	                Opcode[5:3] == 3'b000                                               ? imm_32_SE00:
+					Opcode[5:0] == 6'b001111                                            ? imm_32_1600:
+					                                                                      imm_32_SE  ;
+//CU状态转移控制信号
+    wire          EX_IF;           //EX to IF or not 
+	wire          EX_WB;           //EX to WB or not
+	wire          EX_LD;           //EX to LD or not
+	wire          EX_ST;           //EX to ST or not
+	wire [8:0]    current_stata;
+	assign EX_IF = (Opcode[5:3] != 3'b000)                          ? 0 :
+	               (Opcode[2:0] != 3'b000 && Opcode[2:0] != 3'b011) ? 1 :
+				                                                      0 ; 
+    assign EX_WB = (Opcode == 6'b000000 || Opcode == 6'b000011) ? 1 :
+	               (Opcode[5:3] != 3'b001)                      ? 0 :
+				   (Opcode[2:0] != 3'b000)                      ? 1 :
+				                                                  0 ;										
+	assign EX_LD = Opcode[5:3] == 3'b100;
+	assign EX_ST = Opcode[5:3] == 3'b101;
+
+//写地址RF_waddr选择	rt，rd，11111(jal)
+	assign RegDst    = instruction[31]^instruction[29];
+	assign RF_waddr  = RegDst    ? rt       :
+	                   Opcode[0] ? 5'b11111 :
+							             rd ; //选择写地址是哪一个
+
+//branch计算
+    assign branch = Opcode[5:2] == 1'h1 | Opcode == 6'b000001;
+
+//move计算
+    assign move = (Opcode == 6'b000000 && (func == 6'b001011 || func == 6'b001010));
+
+//jump计算
+    assign jump = Opcode == 6'b000010 || Opcode == 6'b000011 || (Opcode == 6'b000000 && (func == 6'b001000 || func == 6'b001001));
+
+//ALUSrc计算   ALUSrc[2] == 1,选择rsdata，反之为32'b0;ALUSrc[1:0] == 00,选择32'b0,== 01，选择imm_32,==10,选择rtdata
+    assign ALUSrc[2]   = move ? 1'b0 : 1'b1 ;
+	assign ALUSrc[1:0] = move                                                              ? 2'b10 :
+	                     Opcode == 6'b000000 || Opcode == 6'b000100 || Opcode == 6'b000101 ? 2'b10 :
+						 Opcode == 6'b000110 || Opcode == 6'b000111 || Opcode == 6'b000001 ? 2'b00 :
+						                                                                     2'b01 ;
+	                             
+//写使能RF_wen判断
+    assign RF_wen = current_stata != WB                                       ? 1'b0 :
+	                Opcode[5:3]   == 3'b101                                   ? 1'b0 :
+	                Opcode        == 6'b000010                                ? 1'b0 :
+	                branch                                                    ? 1'b0 :
+					(Opcode       == 6'b000000 && func == 6'b001000)          ? 1'b0 :
+					(Opcode       == 6'b000000 && func == 6'b001011 && zero)  ? 1'b0 : 
+					(Opcode       == 6'b000000 && func == 6'b001010 && ~zero) ? 1'b0 :
+					                                                             1'b1;
+
+//寄存器堆模块
+	reg_file instance_reg_file(
+        .clk(clk),
+		.waddr(RF_waddr),
+		.raddr1(rs),
+		.raddr2(rt),
+		.wen(RF_wen),
+		.wdata(_RF_wdata),
+		.rdata1(rsdata),
+		.rdata2(rtdata)
+	);
+
+//shifter模块
+    assign shiftlength = func[2] ? rsdata[4:0] : shamt ;
+    shifter instance_shifter(
+		.Shiftop(func[1:0]),
+		.A(rtdata),
+		.B(shiftlength),
+	    .Result(rddata)
+	);
+
+//利用ALUSrc选取ALU输入,并计算得Result,Zero
+	wire [31:0] rdata1;
+	wire [31:0] rdata2;
+	wire [2:0]  ALUop;
+	assign rdata1 = ALUSrc[2]   == 1'b1  ? rsdata : 32'b0 ;
+	assign rdata2 = ALUSrc[1:0] == 2'b00 ? 32'b0  :
+	                ALUSrc[1:0] == 2'b01 ? imm_32 : rtdata;
+	ALUop instance_ALUop(
+		.Opcode(Opcode),
+		.func(func),
+		.ALUop(ALUop)
+	);
+    alu instance_alu(
+        .A(rdata1),
+		.B(rdata2),
+		.ALUop(ALUop),
+		.Zero(zero),
+		.Result(Result)
+	);
+
+//   wire [31:0] Result;
+//   reg  [31:0] reg_result;
+//   always @(*)begin
+//      if(current_stata == EX)begin
+// 		reg_result = result;
+// 	  end
+// 	  else begin
+// 		reg_result = reg_result;
+// 	 end
+//    end
+//    assign Result = reg_result;
+
+//mem_data的确定
+    wire [31:0] mem_data; //lb~lwr指令，要往寄存器堆写入的东西
+	wire [31:0] lwl_data;
+	wire [31:0] lwr_data;
+	assign lwl_data = Result[1:0] == 2'b00  ? {Read_data[7:0],rtdata[23:0] }    :
+	                  Result[1:0] == 2'b01  ? {Read_data[15:0],rtdata[15:0]}    :
+					  Result[1:0] == 2'b10  ? {Read_data[23:0],rtdata[7:0] }    :
+					                                Read_data                   ;
+
+	assign lwr_data = Result[1:0] == 2'b00  ? Read_data                         :
+	                  Result[1:0] == 2'b01  ? {rtdata[31:24],Read_data[31:8]}   :
+					  Result[1:0] == 2'b10  ? {rtdata[31:16],Read_data[31:16]}  :
+					                          {rtdata[31:8],Read_data[31:24]}   ;
+    wire [31:0] lb_mem_data;
+	wire [31:0] lbu_mem_data;
+	wire [31:0] lh_mem_data;
+	wire [31:0] lhu_mem_data;
+	assign lb_mem_data = Result[1:0] == 2'b00 ? {{24{Read_data[7]}},Read_data[7:0]}     : 
+	                     Result[1:0] == 2'b01 ? {{24{Read_data[15]}},Read_data[15:8]}   :
+						 Result[1:0] == 2'b10 ? {{24{Read_data[23]}},Read_data[23:16]}  :
+						                        {{24{Read_data[31]}},Read_data[31:24]}  ;
+	assign lbu_mem_data = Result[1:0] == 2'b00 ? {{24{1'b0}},Read_data[7:0]}  :
+	                      Result[1:0] == 2'b01 ? {{24{1'b0}},Read_data[15:8]} :
+						  Result[1:0] == 2'b10 ? {{24{1'b0}},Read_data[23:16]}:
+						                         {{24{1'b0}},Read_data[31:24]}; 
+	assign lh_mem_data = Result[1:0] == 2'b00 ? {{16{Read_data[15]}},Read_data[15:0]} : 
+	                                            {{16{Read_data[31]}},Read_data[31:16]};                     
+	assign lhu_mem_data = Result[1:0] == 2'b00 ? {{24{1'b0}},Read_data[15:0]}         :
+	                                             {{24{1'b0}},Read_data[31:16]}        ;
+	                      
+    assign mem_data = Opcode[2:0] == 3'b000 ? lb_mem_data          :
+	                  Opcode[2:0] == 3'b100 ? lbu_mem_data         :
+					  Opcode[2:0] == 3'b001 ? lh_mem_data          :
+					  Opcode[2:0] == 3'b101 ? lhu_mem_data         :
+					  Opcode[2:0] == 3'b011 ? Read_data            :
+					  Opcode[2:0] == 3'b010 ? lwl_data :   lwr_data;
+
+//RF_wdata的选择 
+    assign RF_wdata = Opcode == 6'b0 ? (
+		              func   == 6'b001000 || func == 6'b001001 ? PC+4    :
+					  func   == 6'b001011 || func == 6'b001010 ? rsdata  :
+					  func[5]== 1'b0                           ? rddata  :  
+					                                             Result) :
+					  Opcode      == 6'b001111 ? imm_32     :
+					  Opcode[5:3] == 3'b001    ? Result     :
+					  Opcode[5:3] == 3'b100    ? mem_data   :  PC+4      ;
+    reg [31:0] _RF_wdata;
+	always @(posedge clk) begin
+	   _RF_wdata <= RF_wdata;
+	end
+
+//Address的确定
+   assign Address = {Result[31:2],2'b00};
+
+//Write_data和Write_strb的确定
+   wire [31:0] swr_rtdata;
+   wire [31:0] swl_rtdata;
+   assign swl_rtdata = Result[1:0] == 2'b00 ? {{24{1'b0}},rtdata[31:24]} :
+                       Result[1:0] == 2'b01 ? {{16{1'b0}},rtdata[31:16]} :
+					   Result[1:0] == 2'b10 ? {{8{1'b0}},rtdata[31:8]}   :
+					                          rtdata                     ;
+   assign swr_rtdata = Result[1:0] == 2'b11 ? {rtdata[7:0],{24{1'b0}}}   :
+                       Result[1:0] == 2'b10 ? {rtdata[15:0],{16{1'b0}}}  :
+					   Result[1:0] == 2'b01 ? {rtdata[23:0],{8{1'b0}}}   :
+					                           rtdata                    ;           
+   assign Write_data = Opcode == 6'b101000 ? rtdata<<(8*Result[1:0]) :
+                       Opcode == 6'b101001 ? rtdata<<(16*Result[1])  :
+					   Opcode == 6'b101011 ? rtdata                  :
+					   Opcode == 6'b101010 ? swl_rtdata  : swr_rtdata;                                           
+
+	wire [3:0] strb_1;
+	assign strb_1[0] = (Result[1:0] == 2'b00);
+    assign strb_1[1] = (Result[1:0] == 2'b01);
+	assign strb_1[2] = (Result[1:0] == 2'b10);
+	assign strb_1[3] = (Result[1:0] == 2'b11);   
+	wire [3:0] strb_2;
+	assign strb_2[1:0] = {2{(Result[1] == 1'b0)}};
+	assign strb_2[3:2] = {2{(Result[1] == 1'b1)}};
+	wire [3:0] strb_3 = 4'b1111;
+	wire [3:0] strb_4;
+	assign strb_4 = 4'b1111 >> (3-Result[1:0]);
+	wire [3:0] strb_5;
+	assign strb_5 = 4'b1111 << Result[1:0];
+	assign Write_strb = Opcode[2:0] == 3'b000 ? strb_1 :
+	                    Opcode[2:0] == 3'b001 ? strb_2 :
+						Opcode[2:0] == 3'b011 ? strb_3 :
+						Opcode[2:0] == 3'b010 ? strb_4 :
+						                        strb_5 ;
+    
+//CU模块实例化，利用current计算某些信号
+    CU instance_CU(
+		.EX_IF(EX_IF),
+		.EX_LD(EX_LD),
+		.EX_ST(EX_ST),
+		.EX_WB(EX_WB),
+		.clk(clk),
+		.rst(rst),
+		.Inst_Req_Ready(Inst_Req_Ready),
+		.Inst_Valid(Inst_Valid),
+		.Mem_Req_Ready(Mem_Req_Ready),
+		.Read_data_Valid(Read_data_Valid),
+		.Instruction(instruction),
+		.current_stata(current_stata),
+		.Inst_Req_Valid(Inst_Req_Valid),
+		.Inst_Ready(Inst_Ready),
+		.Read_data_Ready(Read_data_Ready),
+		.MemRead(MemRead),
+		.MemWrite(MemWrite)
+	);
+    
+//PC的时序逻辑更新
+wire        is_jorb;   //记录是否跳转
+wire [31:0] next_pc;   //跳转地址
+assign is_jorb = jump   ? 1 :
+                 branch ? (
+                      Opcode[2:1] == 2'b10 ? Opcode[0]^zero               :
+					  Opcode[2:1] == 2'b11 ? Opcode[0]^(Result[31]||zero) :
+					                         rt[0]^(Result == 1'b1)       
+				 ): 0;
+
+assign next_pc = branch    ? PC+imm_32_SE00       :
+                 Opcode[1] ? {PC[31:28],tar,2'b0} :
+				                          rsdata  ; 
+reg [31:0] reg_pc; 
+always @(posedge clk) begin
+    if(rst) begin
+	   reg_pc <= 32'b0;
+	end
+	else if(current_stata == ID) begin
+	   reg_pc <= PC+4;
+	end
+	else if(current_stata == EX) begin
+		if(is_jorb) begin
+	        reg_pc <= next_pc;	
+	    end
+	end
+end
+assign PC = reg_pc;
+
+//功能计数器
+   reg [31:0] cycle_cnt;
+   always @(posedge clk) begin
+      if(rst == 1'b1) begin
+	     cycle_cnt <= 32'b0;
+	  end
+	  else begin
+	     cycle_cnt <= cycle_cnt + 32'b1;
+	  end
+   end
+   assign cpu_perf_cnt_0 = cycle_cnt;
+   
+endmodule
+
